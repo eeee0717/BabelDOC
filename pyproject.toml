@@ -1,7 +1,7 @@
 [project]
-name = "BabelDOC"
-version = "0.6.4"
-description = "Yet Another Document Translator"
+name = "babeldoc-stream"
+version = "0.6.4.post1"
+description = "BabelDOC with a stable JSON Lines progress protocol"
 license = "AGPL-3.0"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -9,13 +9,13 @@ authors = [
     { name = "awwaawwa", email = "aw@funstory.ai" }
 ]
 maintainers = [
-    { name = "awwaawwa", email = "aw@funstory.ai" }
+    { name = "eeee0717", email = "chentao020717Work@outlook.com" }
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
-keywords = ["PDF"]
+keywords = ["PDF", "translation", "progress", "JSONL"]
 dependencies = [
     "bitstring>=4.3.0",
     "configargparse>=1.7",
@@ -60,15 +60,20 @@ cuda = ["onnxruntime-gpu>=1.16.1"]
 memray = ["memray>=1.17.1"]
 
 [project.urls]
-Homepage = "https://github.com/funstory-ai/BabelDOC"
-Issues = "https://github.com/funstory-ai/BabelDOC/issues"
+Homepage = "https://github.com/eeee0717/BabelDOC"
+Issues = "https://github.com/eeee0717/BabelDOC/issues"
+Source = "https://github.com/eeee0717/BabelDOC"
+Upstream = "https://github.com/funstory-ai/BabelDOC"
 
 [project.scripts]
-babeldoc = "babeldoc.main:cli"
+babeldoc-stream = "babeldoc.main:cli"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["babeldoc"]
 
 [tool.flake8]
 ignore = ["E203", "E261", "E501", "W503", "E741", "E501"]
@@ -164,7 +169,7 @@ pythonpath = [".", "src"]
 testpaths = ["tests"]
 
 [bumpver]
-current_version = "0.6.4"
+current_version = "0.6.4.post1"
 version_pattern = "MAJOR.MINOR.PATCH[.PYTAGNUM]"
 
 [bumpver.file_patterns]

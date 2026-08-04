@@ -22,11 +22,15 @@ from babeldoc.const import enable_process_pool
 from babeldoc.format.pdf.translation_config import TranslationConfig
 from babeldoc.format.pdf.translation_config import WatermarkOutputMode
 from babeldoc.glossary import Glossary
+from babeldoc.progress_json import JsonProgressEmitter
+from babeldoc.progress_json import cancel_translation_on_signal
+from babeldoc.progress_json import reserve_stdout_for_protocol
+from babeldoc.progress_json import stream_translation_events
 from babeldoc.translator.translator import OpenAITranslator
 from babeldoc.translator.translator import set_translate_rate_limiter
 
 logger = logging.getLogger(__name__)
-__version__ = "0.6.4"
+__version__ = "0.6.4.post1"
 
 
 def create_parser():
@@ -53,6 +57,11 @@ def create_parser():
         "--debug",
         action="store_true",
         help="Use debug logging level.",
+    )
+    parser.add_argument(
+        "--progress-json",
+        action="store_true",
+        help="Emit machine-readable translation progress as JSON Lines on stdout.",
     )
     parser.add_argument(
         "--warmup",
@@ -465,9 +474,12 @@ def create_parser():
     return parser
 
 
-async def main():
+async def main(protocol_stream=None) -> int:
     parser = create_parser()
     args: Any = parser.parse_args()
+
+    if args.progress_json and len(args.files or []) != 1:
+        parser.error("--progress-json requires exactly one --files argument")
 
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -744,24 +756,39 @@ async def main():
             pass
 
         getattr(doc_layout_model, "init_font_mapper", nop)(config)
-        # Create progress handler
-        progress_context, progress_handler = create_progress_handler(
-            config, show_log=False
-        )
+        if args.progress_json:
+            emitter = JsonProgressEmitter(protocol_stream)
+            try:
+                with cancel_translation_on_signal(config):
+                    succeeded = await stream_translation_events(
+                        babeldoc.format.pdf.high_level.async_translate(config),
+                        emitter,
+                    )
+            except BaseException as error:
+                emitter.emit_error(error)
+                return 1
+            if not succeeded:
+                return 1
+            logger.info(str(emitter.result))
+        else:
+            progress_context, progress_handler = create_progress_handler(
+                config, show_log=False
+            )
 
-        # 开始翻译
-        with progress_context:
-            async for event in babeldoc.format.pdf.high_level.async_translate(config):
-                progress_handler(event)
-                if config.debug:
-                    logger.debug(event)
-                if event["type"] == "error":
-                    logger.error(f"Error: {event['error']}")
-                    break
-                if event["type"] == "finish":
-                    result = event["translate_result"]
-                    logger.info(str(result))
-                    break
+            with progress_context:
+                async for event in babeldoc.format.pdf.high_level.async_translate(
+                    config
+                ):
+                    progress_handler(event)
+                    if config.debug:
+                        logger.debug(event)
+                    if event["type"] == "error":
+                        logger.error(f"Error: {event['error']}")
+                        break
+                    if event["type"] == "finish":
+                        result = event["translate_result"]
+                        logger.info(str(result))
+                        break
         usage = config.term_extraction_token_usage
         total_term_extraction_total_tokens += usage["total_tokens"]
         total_term_extraction_prompt_tokens += usage["prompt_tokens"]
@@ -790,6 +817,7 @@ async def main():
             term_extraction_translator.completion_token_count.value,
             term_extraction_translator.cache_hit_prompt_token_count.value,
         )
+    return 0
 
 
 def create_progress_handler(
@@ -915,9 +943,13 @@ def speed_up_logs():
 
 def cli():
     """Command line interface entry point."""
+    from rich.console import Console
     from rich.logging import RichHandler
 
-    logging.basicConfig(level=logging.INFO, handlers=[RichHandler()])
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[RichHandler(console=Console(stderr=True))],
+    )
 
     logging.getLogger("httpx").setLevel("CRITICAL")
     logging.getLogger("httpx").propagate = False
@@ -942,8 +974,24 @@ def cli():
             v.propagate = False
 
     speed_up_logs()
-    babeldoc.format.pdf.high_level.init()
-    asyncio.run(main())
+    progress_json = "--progress-json" in sys.argv[1:]
+    with reserve_stdout_for_protocol(progress_json) as protocol_stream:
+        try:
+            babeldoc.format.pdf.high_level.init()
+            exit_code = asyncio.run(main(protocol_stream=protocol_stream))
+        except SystemExit as error:
+            if progress_json and error.code not in (None, 0):
+                JsonProgressEmitter(protocol_stream).emit_error(
+                    RuntimeError(f"BabelDOC CLI exited with status {error.code}")
+                )
+            raise
+        except BaseException as error:
+            if not progress_json:
+                raise
+            JsonProgressEmitter(protocol_stream).emit_error(error)
+            raise SystemExit(1) from error
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

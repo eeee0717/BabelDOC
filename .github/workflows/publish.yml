@@ -1,0 +1,53 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'eeee0717/BabelDOC'
+    name: Build and publish
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/babeldoc-stream
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup uv with Python 3.12
+        uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          activate-environment: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Verify release tag
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          package_version="$(uv run python -c 'import babeldoc; print(babeldoc.__version__)')"
+          test "${RELEASE_TAG}" = "v${package_version}"
+
+      - name: Check
+        run: |
+          uv run ruff check .
+          uv run ruff format --check babeldoc/main.py babeldoc/progress_json.py tests
+          uv run pytest
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Publish distributions
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0

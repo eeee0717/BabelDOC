@@ -10,32 +10,57 @@ permissions:
 
 jobs:
   checks:
-    name: Package and lightweight PDF smoke
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.12"
+            full: true
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: windows-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - name: Cache BabelDOC assets
+        if: matrix.full
         uses: actions/cache@v5
         with:
           path: ~/.cache/babeldoc
           key: babeldoc-assets-${{ hashFiles('babeldoc/assets/embedding_assets_metadata.py') }}
 
-      - name: Setup uv with Python 3.12
+      - name: Setup uv
         uses: astral-sh/setup-uv@85856786d1ce8acfbcc2f13a5f3fbd6b938f9f41 # v7.1.2
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
           enable-cache: true
-          cache-dependency-glob: "uv.lock"
           activate-environment: true
 
       - name: Install dependencies
         run: uv sync
 
       - name: Lint
+        if: matrix.full
         run: uv run ruff check .
+
+      - name: Format check
+        if: matrix.full
+        run: uv run ruff format --check babeldoc/main.py babeldoc/progress_json.py tests
+
+      - name: Test
+        run: uv run pytest
 
       - name: Build package
         run: uv build
@@ -43,13 +68,15 @@ jobs:
       - name: Import and CLI smoke
         run: |
           uv run python -m compileall babeldoc
-          uv run babeldoc --help
+          uv run babeldoc-stream --help
 
       - name: Lightweight no-secret PDF E2E
+        if: matrix.full
         run: |
-          uv run babeldoc \
+          uv run babeldoc-stream \
             --openai \
             --openai-api-key ci-dummy-key \
             --files examples/ci/test.pdf \
             --only-parse-generate-pdf \
-            --skip-scanned-detection
+            --skip-scanned-detection \
+            --progress-json

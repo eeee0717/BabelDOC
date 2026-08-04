@@ -1,0 +1,17 @@
+BabelDOC Stream
+Copyright (C) 2026 eeee0717
+
+This distribution is a modified version of BabelDOC:
+https://github.com/funstory-ai/BabelDOC
+
+Upstream baseline:
+- Version: v0.6.4
+- Commit: 17480db9df92ddcb37349ce34b312335226e8ec9
+
+The original project and this modified distribution are licensed under the
+GNU Affero General Public License, version 3. The complete license text is in
+LICENSE. Corresponding source for this distribution is available at:
+https://github.com/eeee0717/BabelDOC/tree/v0.6.4.post1
+
+BabelDOC Stream is independently maintained and is not an official
+funstory-ai release.

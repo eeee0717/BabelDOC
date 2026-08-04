@@ -11,15 +11,13 @@
 
 <p>
   <!-- PyPI -->
-  <a href="https://pypi.org/project/BabelDOC/">
-    <img src="https://img.shields.io/pypi/v/BabelDOC"></a>
-  <a href="https://pepy.tech/projects/BabelDOC">
-    <img src="https://static.pepy.tech/badge/BabelDOC"></a>
+  <a href="https://pypi.org/project/babeldoc-stream/">
+    <img src="https://img.shields.io/pypi/v/babeldoc-stream"></a>
   <!-- <a href="https://github.com/funstory-ai/BabelDOC/pulls">
     <img src="https://img.shields.io/badge/contributions-welcome-green"></a> -->
   <!-- License -->
   <a href="./LICENSE">
-    <img src="https://img.shields.io/github/license/funstory-ai/BabelDOC"></a>
+    <img src="https://img.shields.io/github/license/eeee0717/BabelDOC"></a>
   <a href="https://t.me/+Z9_SgnxmsmA5NzBl">
     <img src="https://img.shields.io/badge/Telegram-2CA5E0?style=flat-squeare&logo=telegram&logoColor=white"></a>
   <a href="https://deepwiki.com/funstory-ai/BabelDOC"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
@@ -28,6 +26,14 @@
 <a href="https://trendshift.io/repositories/13358" target="_blank"><img src="https://trendshift.io/api/badge/repositories/13358" alt="funstory-ai%2FBabelDOC | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 
 </div>
+
+> [!IMPORTANT]
+>
+> **BabelDOC Stream is an independent downstream distribution.** It is based on
+> [funstory-ai/BabelDOC](https://github.com/funstory-ai/BabelDOC) v0.6.4 and
+> adds a stable JSON Lines progress protocol for host applications. It is not an
+> official funstory-ai release. See [NOTICE](./NOTICE) for provenance and license
+> information.
 
 PDF scientific paper translation and bilingual comparison library.
 
@@ -68,18 +74,18 @@ We recommend using the Tool feature of [uv](https://github.com/astral-sh/uv) to 
 2. Use the following command to install BabelDOC:
 
 ```bash
-uv tool install --python 3.12 BabelDOC
+uv tool install --python 3.12 babeldoc-stream
 
-babeldoc --help
+babeldoc-stream --help
 ```
 
-3. Use the `babeldoc` command. For example:
+3. Use the `babeldoc-stream` command. For example:
 
 ```bash
-babeldoc --openai --openai-model "gpt-4o-mini" --openai-base-url "https://api.openai.com/v1" --openai-api-key "your-api-key-here"  --files example.pdf
+babeldoc-stream --openai --openai-model "gpt-4o-mini" --openai-base-url "https://api.openai.com/v1" --openai-api-key "your-api-key-here"  --files example.pdf
 
 # multiple files
-babeldoc --openai --openai-model "gpt-4o-mini" --openai-base-url "https://api.openai.com/v1" --openai-api-key "your-api-key-here"  --files example1.pdf --files example2.pdf
+babeldoc-stream --openai --openai-model "gpt-4o-mini" --openai-base-url "https://api.openai.com/v1" --openai-api-key "your-api-key-here"  --files example1.pdf --files example2.pdf
 ```
 
 ### Install from Source
@@ -92,22 +98,22 @@ We still recommend using [uv](https://github.com/astral-sh/uv) to manage virtual
 
 ```bash
 # clone the project
-git clone https://github.com/funstory-ai/BabelDOC
+git clone https://github.com/eeee0717/BabelDOC
 
 # enter the project directory
 cd BabelDOC
 
-# install dependencies and run babeldoc
-uv run babeldoc --help
+# install dependencies and run babeldoc-stream
+uv run babeldoc-stream --help
 ```
 
-3. Use the `uv run babeldoc` command. For example:
+3. Use the `uv run babeldoc-stream` command. For example:
 
 ```bash
-uv run babeldoc --files example.pdf --openai --openai-model "gpt-4o-mini" --openai-base-url "https://api.openai.com/v1" --openai-api-key "your-api-key-here"
+uv run babeldoc-stream --files example.pdf --openai --openai-model "gpt-4o-mini" --openai-base-url "https://api.openai.com/v1" --openai-api-key "your-api-key-here"
 
 # multiple files
-uv run babeldoc --files example.pdf --files example2.pdf --openai --openai-model "gpt-4o-mini" --openai-base-url "https://api.openai.com/v1" --openai-api-key "your-api-key-here"
+uv run babeldoc-stream --files example.pdf --files example2.pdf --openai --openai-model "gpt-4o-mini" --openai-base-url "https://api.openai.com/v1" --openai-api-key "your-api-key-here"
 ```
 
 > [!TIP]
@@ -234,6 +240,23 @@ uv run babeldoc --files example.pdf --files example2.pdf --openai --openai-model
 - `--output`, `-o`: Output directory for translated files. If not set, use current working directory.
 - `--debug`: Enable debug logging level and export detailed intermediate results in `~/.cache/babeldoc/working`.
 - `--report-interval`: Progress report interval in seconds (default: 0.1).
+- `--progress-json`: Emit the `babeldoc-stream/v1` JSON Lines protocol on stdout. This mode requires exactly one `--files` argument; logs and tracebacks are written to stderr.
+
+#### JSON Lines progress protocol
+
+Host applications should launch `babeldoc-stream` as a subprocess and read one
+JSON object per stdout line. The protocol emits normalized progress, one terminal
+error, or one terminal finish event:
+
+```json
+{"schema":"babeldoc-stream/v1","type":"progress","stage":"Translate Paragraphs","progress":55.4}
+{"schema":"babeldoc-stream/v1","type":"error","name":"ScannedPDFError","message":"Scanned PDF detected."}
+{"schema":"babeldoc-stream/v1","type":"finish","result":{"original_pdf_path":"/path/input.pdf","mono_pdf_path":"/path/output.pdf","dual_pdf_path":null,"total_seconds":123.4}}
+```
+
+Progress values are finite numbers clamped to `0..100`. A terminal error exits
+non-zero; a successful run emits `finish` before exiting zero. SIGINT and SIGTERM
+first request graceful cancellation through BabelDOC's translation configuration.
 
 ### General Options
 
@@ -247,8 +270,8 @@ uv run babeldoc --files example.pdf --files example2.pdf --openai --openai-model
 > [!TIP]
 > 
 > 1. Offline assets packages are useful for environments without internet access or to speed up installation on multiple machines.
-> 2. Generate a package once with `babeldoc --generate-offline-assets /path/to/output/dir` and then distribute it.
-> 3. Restore the package on target machines with `babeldoc --restore-offline-assets /path/to/offline_assets_*.zip`.
+> 2. Generate a package once with `babeldoc-stream --generate-offline-assets /path/to/output/dir` and then distribute it.
+> 3. Restore the package on target machines with `babeldoc-stream --restore-offline-assets /path/to/offline_assets_*.zip`.
 > 4. The offline assets package name cannot be modified because the file list hash is encoded in the name.
 > 5. If you provide a directory path to `--restore-offline-assets`, the tool will automatically look for the correct offline assets package file in that directory.
 > 6. The package contains all necessary fonts and models required for document processing, ensuring consistent results across different environments.
