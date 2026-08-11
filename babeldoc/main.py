@@ -18,19 +18,21 @@ from rich.progress import TimeRemainingColumn
 
 import babeldoc.assets.assets
 import babeldoc.format.pdf.high_level
+from babeldoc.assets.assets import set_asset_progress_callback
 from babeldoc.const import enable_process_pool
 from babeldoc.format.pdf.translation_config import TranslationConfig
 from babeldoc.format.pdf.translation_config import WatermarkOutputMode
 from babeldoc.glossary import Glossary
-from babeldoc.progress_json import JsonProgressEmitter
+from babeldoc.progress_json import JsonProgressEmitterV2
 from babeldoc.progress_json import cancel_translation_on_signal
+from babeldoc.progress_json import create_progress_emitter
 from babeldoc.progress_json import reserve_stdout_for_protocol
 from babeldoc.progress_json import stream_translation_events
 from babeldoc.translator.translator import OpenAITranslator
 from babeldoc.translator.translator import set_translate_rate_limiter
 
 logger = logging.getLogger(__name__)
-__version__ = "0.6.4.post1"
+__version__ = "0.6.4.post2"
 
 
 def create_parser():
@@ -62,6 +64,13 @@ def create_parser():
         "--progress-json",
         action="store_true",
         help="Emit machine-readable translation progress as JSON Lines on stdout.",
+    )
+    parser.add_argument(
+        "--progress-json-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="Structured progress protocol version (default: 1).",
     )
     parser.add_argument(
         "--warmup",
@@ -481,6 +490,17 @@ async def main(protocol_stream=None) -> int:
     if args.progress_json and len(args.files or []) != 1:
         parser.error("--progress-json requires exactly one --files argument")
 
+    emitter = (
+        create_progress_emitter(args.progress_json_version, protocol_stream)
+        if args.progress_json
+        else None
+    )
+    previous_asset_progress_callback = None
+    if isinstance(emitter, JsonProgressEmitterV2):
+        previous_asset_progress_callback = set_asset_progress_callback(
+            emitter.handle_asset_progress
+        )
+
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
@@ -562,6 +582,9 @@ async def main(protocol_stream=None) -> int:
     # 设置翻译速率限制
     set_translate_rate_limiter(args.qps)
     # 初始化文档布局模型
+    if isinstance(emitter, JsonProgressEmitterV2):
+        emitter.emit_progress("checking_assets", None, 0)
+        emitter.emit_progress("loading_model", None, 0)
     if args.rpc_doclayout:
         from babeldoc.docvision.rpc_doclayout import RpcDocLayoutModel
 
@@ -594,6 +617,8 @@ async def main(protocol_stream=None) -> int:
         from babeldoc.docvision.doclayout import DocLayoutModel
 
         doc_layout_model = DocLayoutModel.load_onnx()
+    if isinstance(emitter, JsonProgressEmitterV2):
+        emitter.emit_progress("loading_model", None, 4)
 
     if args.translate_table_text:
         from babeldoc.docvision.table_detection.rapidocr import RapidOCRModel
@@ -757,7 +782,7 @@ async def main(protocol_stream=None) -> int:
 
         getattr(doc_layout_model, "init_font_mapper", nop)(config)
         if args.progress_json:
-            emitter = JsonProgressEmitter(protocol_stream)
+            assert emitter is not None
             try:
                 with cancel_translation_on_signal(config):
                     succeeded = await stream_translation_events(
@@ -766,8 +791,10 @@ async def main(protocol_stream=None) -> int:
                     )
             except BaseException as error:
                 emitter.emit_error(error)
+                set_asset_progress_callback(previous_asset_progress_callback)
                 return 1
             if not succeeded:
+                set_asset_progress_callback(previous_asset_progress_callback)
                 return 1
             logger.info(str(emitter.result))
         else:
@@ -796,6 +823,8 @@ async def main(protocol_stream=None) -> int:
         total_term_extraction_cache_hit_prompt_tokens += usage[
             "cache_hit_prompt_tokens"
         ]
+    if args.progress_json:
+        set_asset_progress_callback(previous_asset_progress_callback)
     logger.info(f"Total tokens: {translator.token_count.value}")
     logger.info(f"Prompt tokens: {translator.prompt_token_count.value}")
     logger.info(f"Completion tokens: {translator.completion_token_count.value}")
@@ -975,23 +1004,37 @@ def cli():
 
     speed_up_logs()
     progress_json = "--progress-json" in sys.argv[1:]
+    progress_json_version = 2 if _argv_requests_progress_v2(sys.argv[1:]) else 1
     with reserve_stdout_for_protocol(progress_json) as protocol_stream:
         try:
             babeldoc.format.pdf.high_level.init()
             exit_code = asyncio.run(main(protocol_stream=protocol_stream))
         except SystemExit as error:
             if progress_json and error.code not in (None, 0):
-                JsonProgressEmitter(protocol_stream).emit_error(
+                create_progress_emitter(
+                    progress_json_version, protocol_stream
+                ).emit_error(
                     RuntimeError(f"BabelDOC CLI exited with status {error.code}")
                 )
             raise
         except BaseException as error:
             if not progress_json:
                 raise
-            JsonProgressEmitter(protocol_stream).emit_error(error)
+            create_progress_emitter(progress_json_version, protocol_stream).emit_error(
+                error
+            )
             raise SystemExit(1) from error
     if exit_code:
         raise SystemExit(exit_code)
+
+
+def _argv_requests_progress_v2(argv: list[str]) -> bool:
+    for index, argument in enumerate(argv):
+        if argument == "--progress-json-version" and index + 1 < len(argv):
+            return argv[index + 1] == "2"
+        if argument == "--progress-json-version=2":
+            return True
+    return False
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,22 @@ logger = logging.getLogger(__name__)
 _FASTEST_FONT_UPSTREAM_LOCK = asyncio.Lock()
 _FASTEST_FONT_UPSTREAM: str | None = None
 _FASTEST_FONT_METADATA: dict | None = None
+_ASSET_PROGRESS_CALLBACK: Callable[[str, str, float | None], None] | None = None
+
+
+def set_asset_progress_callback(
+    callback: Callable[[str, str, float | None], None] | None,
+) -> Callable[[str, str, float | None], None] | None:
+    """Set the process-local asset transfer reporter and return its previous value."""
+    global _ASSET_PROGRESS_CALLBACK
+    previous = _ASSET_PROGRESS_CALLBACK
+    _ASSET_PROGRESS_CALLBACK = callback
+    return previous
+
+
+def _report_asset_progress(stage: str, asset_id: str, progress: float | None) -> None:
+    if _ASSET_PROGRESS_CALLBACK is not None:
+        _ASSET_PROGRESS_CALLBACK(stage, asset_id, progress)
 
 
 class ResultContainer:
@@ -89,6 +106,10 @@ def _retry_if_not_cancelled_and_failed(retry_state):
 def verify_file(path: Path, sha3_256: str):
     if not path.exists():
         return False
+    total = path.stat().st_size
+    asset_id = str(path)
+    _report_asset_progress("checking_assets", asset_id, 0.0 if total else None)
+    checked = 0
     hash_ = hashlib.sha3_256()
     with path.open("rb") as f:
         while True:
@@ -96,6 +117,12 @@ def verify_file(path: Path, sha3_256: str):
             if not chunk:
                 break
             hash_.update(chunk)
+            checked += len(chunk)
+            _report_asset_progress(
+                "checking_assets",
+                asset_id,
+                min(100.0, checked * 100 / total) if total else None,
+            )
     return hash_.hexdigest() == sha3_256
 
 
@@ -114,18 +141,49 @@ async def download_file(
     path: Path = None,
     sha3_256: str = None,
 ):
-    if client is None:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, follow_redirects=True)
-    else:
-        response = await client.get(url, follow_redirects=True)
+    async def transfer(active_client: httpx.AsyncClient) -> None:
+        request = active_client.build_request("GET", url)
+        response = await active_client.send(request, follow_redirects=True, stream=True)
+        temp_path = path.with_name(f"{path.name}.part")
+        asset_id = str(path)
+        try:
+            response.raise_for_status()
+            content_length = response.headers.get("content-length")
+            try:
+                total = int(content_length) if content_length is not None else None
+            except ValueError:
+                total = None
+            _report_asset_progress(
+                "downloading_assets",
+                asset_id,
+                0.0 if total and total > 0 else None,
+            )
+            downloaded = 0
+            with temp_path.open("wb") as file:
+                async for chunk in response.aiter_bytes(64 * 1024):
+                    file.write(chunk)
+                    downloaded += len(chunk)
+                    progress = (
+                        min(100.0, downloaded * 100 / total)
+                        if total and total > 0
+                        else None
+                    )
+                    _report_asset_progress("downloading_assets", asset_id, progress)
+            if not verify_file(temp_path, sha3_256):
+                raise ValueError(f"File {path} is corrupted")
+            temp_path.replace(path)
+            _report_asset_progress("downloading_assets", asset_id, 100.0)
+        except BaseException:
+            temp_path.unlink(missing_ok=True)
+            raise
+        finally:
+            await response.aclose()
 
-    response.raise_for_status()
-    with path.open("wb") as f:
-        f.write(response.content)
-    if not verify_file(path, sha3_256):
-        path.unlink(missing_ok=True)
-        raise ValueError(f"File {path} is corrupted")
+    if client is None:
+        async with httpx.AsyncClient() as owned_client:
+            await transfer(owned_client)
+    else:
+        await transfer(client)
 
 
 @retry(

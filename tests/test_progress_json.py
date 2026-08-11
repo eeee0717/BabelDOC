@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from babeldoc.progress_json import JsonProgressEmitter
+from babeldoc.progress_json import JsonProgressEmitterV2
 from babeldoc.progress_json import cancel_translation_on_signal
 from babeldoc.progress_json import stream_translation_events
 
@@ -93,6 +94,116 @@ def test_cancelled_error_class_gets_stable_message():
         "name": "CancelledError",
         "message": "Translation cancelled",
     }
+
+
+def test_v2_emits_initialization_and_structured_translation_progress():
+    stream = io.StringIO()
+    emitter = JsonProgressEmitterV2(stream)
+
+    emitter.emit_progress("loading_model", None, 0)
+    emitter.handle_asset_progress("downloading_assets", "layout-model", 50)
+    emitter.emit_progress("loading_model", None, 4)
+    emitter.handle(
+        {
+            "type": "progress_start",
+            "stage": "Parse PDF and Create Intermediate Representation",
+            "stage_progress": 0,
+            "overall_progress": 0,
+        }
+    )
+    emitter.handle(
+        {
+            "type": "progress_update",
+            "stage": "Translate Paragraphs",
+            "stage_progress": 25,
+            "overall_progress": 50,
+        }
+    )
+
+    assert emitted(stream) == [
+        {
+            "schema": "babeldoc-stream/v2",
+            "type": "progress",
+            "stage": "loading_model",
+            "stage_progress": None,
+            "overall_progress": 0.0,
+        },
+        {
+            "schema": "babeldoc-stream/v2",
+            "type": "progress",
+            "stage": "downloading_assets",
+            "stage_progress": 50.0,
+            "overall_progress": 2.0,
+        },
+        {
+            "schema": "babeldoc-stream/v2",
+            "type": "progress",
+            "stage": "loading_model",
+            "stage_progress": None,
+            "overall_progress": 4.0,
+        },
+        {
+            "schema": "babeldoc-stream/v2",
+            "type": "progress",
+            "stage": "parsing",
+            "stage_progress": 0.0,
+            "overall_progress": 5.0,
+        },
+        {
+            "schema": "babeldoc-stream/v2",
+            "type": "progress",
+            "stage": "translating",
+            "stage_progress": 25.0,
+            "overall_progress": 52.5,
+        },
+    ]
+
+
+def test_v2_keeps_overall_progress_monotonic_and_resets_per_asset():
+    stream = io.StringIO()
+    emitter = JsonProgressEmitterV2(stream)
+
+    emitter.handle_asset_progress("checking_assets", "font-a", 80)
+    emitter.handle_asset_progress("checking_assets", "font-a", 40)
+    emitter.handle_asset_progress("checking_assets", "font-b", 10)
+    emitter.handle(
+        {
+            "type": "progress_update",
+            "stage": "Parse Page Layout",
+            "stage_progress": 20,
+            "overall_progress": 10,
+        }
+    )
+    emitter.handle_asset_progress("downloading_assets", "font-c", None)
+
+    events = emitted(stream)
+    assert [event["overall_progress"] for event in events] == sorted(
+        event["overall_progress"] for event in events
+    )
+    assert [event["stage_progress"] for event in events[:2]] == [80.0, 10.0]
+    assert events[-1] == {
+        "schema": "babeldoc-stream/v2",
+        "type": "progress",
+        "stage": "downloading_assets",
+        "stage_progress": None,
+        "overall_progress": 14.5,
+    }
+
+
+def test_v2_terminal_events_use_v2_schema():
+    stream = io.StringIO()
+    emitter = JsonProgressEmitterV2(stream)
+
+    emitter.handle({"type": "error", "error": ValueError("bad input")})
+
+    assert emitted(stream) == [
+        {
+            "schema": "babeldoc-stream/v2",
+            "type": "error",
+            "name": "ValueError",
+            "message": "bad input",
+        }
+    ]
 
 
 def test_stream_translation_events_requires_terminal_event():

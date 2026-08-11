@@ -16,7 +16,26 @@ from types import FrameType
 from typing import Any
 from typing import TextIO
 
-PROTOCOL_SCHEMA = "babeldoc-stream/v1"
+PROTOCOL_SCHEMA_V1 = "babeldoc-stream/v1"
+PROTOCOL_SCHEMA_V2 = "babeldoc-stream/v2"
+PROTOCOL_SCHEMA = PROTOCOL_SCHEMA_V1
+
+V2_STAGE_BY_INTERNAL_NAME = {
+    "Parse PDF": "parsing",
+    "Parse PDF and Create Intermediate Representation": "parsing",
+    "DetectScannedFile": "analyzing",
+    "Parse Page Layout": "analyzing",
+    "Parse Table": "analyzing",
+    "Parse Paragraphs": "analyzing",
+    "Parse Formulas and Styles": "analyzing",
+    "Automatic Term Extraction": "extracting_terms",
+    "Translate Paragraphs": "translating",
+    "Typesetting": "typesetting",
+    "Add Fonts": "typesetting",
+    "Generate drawing instructions": "rendering",
+    "Subset font": "rendering",
+    "Save PDF": "rendering",
+}
 
 
 @contextmanager
@@ -62,8 +81,10 @@ class JsonProgressEmitter:
 
     def __init__(self, stream: TextIO | None = None):
         self.stream = stream or sys.stdout
+        self.schema = PROTOCOL_SCHEMA_V1
         self.terminal_emitted = False
         self.result: Any = None
+        self._lock = threading.RLock()
 
     def handle(self, event: dict[str, Any]) -> str | None:
         """Emit a supported event and return its normalized protocol type."""
@@ -81,7 +102,7 @@ class JsonProgressEmitter:
                 return None
             self._emit(
                 {
-                    "schema": PROTOCOL_SCHEMA,
+                    "schema": self.schema,
                     "type": "progress",
                     "stage": stage,
                     "progress": max(0.0, min(100.0, progress)),
@@ -97,7 +118,7 @@ class JsonProgressEmitter:
             self.result = event.get("translate_result")
             self._emit(
                 {
-                    "schema": PROTOCOL_SCHEMA,
+                    "schema": self.schema,
                     "type": "finish",
                     "result": _translate_result_payload(self.result),
                 }
@@ -114,7 +135,7 @@ class JsonProgressEmitter:
         name, message = _error_details(error)
         self._emit(
             {
-                "schema": PROTOCOL_SCHEMA,
+                "schema": self.schema,
                 "type": "error",
                 "name": name,
                 "message": message,
@@ -123,13 +144,105 @@ class JsonProgressEmitter:
         self.terminal_emitted = True
 
     def _emit(self, payload: dict[str, Any]) -> None:
-        self.stream.write(
-            json.dumps(
-                payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        with self._lock:
+            self.stream.write(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
             )
-            + "\n"
+            self.stream.flush()
+
+
+class JsonProgressEmitterV2(JsonProgressEmitter):
+    """Emit full-workflow progress with stable stages and monotonic completion."""
+
+    def __init__(self, stream: TextIO | None = None):
+        super().__init__(stream)
+        self.schema = PROTOCOL_SCHEMA_V2
+        self.last_overall_progress = 0.0
+        self.last_asset_id: str | None = None
+        self.last_asset_progress: float | None = None
+
+    def handle(self, event: dict[str, Any]) -> str | None:
+        if self.terminal_emitted:
+            return None
+
+        event_type = event.get("type")
+        if event_type in ("progress_start", "progress_update", "progress_end"):
+            stage = event.get("stage")
+            overall = _finite_progress(event.get("overall_progress"))
+            if not isinstance(stage, str) or overall is None:
+                return None
+            stage_progress = _finite_progress(event.get("stage_progress"))
+            if event_type == "progress_start":
+                stage_progress = 0.0
+            elif event_type == "progress_end":
+                stage_progress = 100.0
+            self.emit_progress(
+                V2_STAGE_BY_INTERNAL_NAME.get(stage, "analyzing"),
+                stage_progress,
+                5.0 + overall * 0.95,
+            )
+            return "progress"
+
+        return super().handle(event)
+
+    def emit_progress(
+        self,
+        stage: str,
+        stage_progress: float | None,
+        overall_progress: float,
+    ) -> None:
+        if self.terminal_emitted:
+            return
+        normalized_stage_progress = _finite_progress(stage_progress)
+        normalized_overall = _finite_progress(overall_progress)
+        if normalized_overall is None:
+            return
+        normalized_overall = max(self.last_overall_progress, normalized_overall)
+        self.last_overall_progress = normalized_overall
+        self._emit(
+            {
+                "schema": self.schema,
+                "type": "progress",
+                "stage": stage,
+                "stage_progress": normalized_stage_progress,
+                "overall_progress": normalized_overall,
+            }
         )
-        self.stream.flush()
+
+    def handle_asset_progress(
+        self, stage: str, asset_id: str, progress: float | None
+    ) -> None:
+        normalized = _finite_progress(progress)
+        if asset_id == self.last_asset_id:
+            if normalized is None and self.last_asset_progress is None:
+                return
+            if normalized is not None:
+                previous = self.last_asset_progress or 0.0
+                normalized = max(previous, normalized)
+                if normalized < 100.0 and normalized - previous < 0.5:
+                    return
+        else:
+            self.last_asset_id = asset_id
+        self.last_asset_progress = normalized
+
+        overall = self.last_overall_progress
+        if overall < 5.0 and normalized is not None:
+            overall = max(overall, normalized * 0.04)
+        self.emit_progress(stage, normalized, overall)
+
+
+def create_progress_emitter(
+    version: int, stream: TextIO | None = None
+) -> JsonProgressEmitter:
+    if version == 2:
+        return JsonProgressEmitterV2(stream)
+    return JsonProgressEmitter(stream)
 
 
 async def stream_translation_events(
@@ -213,3 +326,12 @@ def _finite_number_or_zero(value: Any) -> float:
         return 0.0
     value = float(value)
     return value if math.isfinite(value) else 0.0
+
+
+def _finite_progress(value: Any) -> float | None:
+    if not isinstance(value, int | float):
+        return None
+    value = float(value)
+    if not math.isfinite(value):
+        return None
+    return max(0.0, min(100.0, value))

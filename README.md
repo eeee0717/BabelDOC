@@ -240,7 +240,8 @@ uv run babeldoc-stream --files example.pdf --files example2.pdf --openai --opena
 - `--output`, `-o`: Output directory for translated files. If not set, use current working directory.
 - `--debug`: Enable debug logging level and export detailed intermediate results in `~/.cache/babeldoc/working`.
 - `--report-interval`: Progress report interval in seconds (default: 0.1).
-- `--progress-json`: Emit the `babeldoc-stream/v1` JSON Lines protocol on stdout. This mode requires exactly one `--files` argument; logs and tracebacks are written to stderr.
+- `--progress-json`: Emit a stable JSON Lines protocol on stdout. This mode requires exactly one `--files` argument; logs and tracebacks are written to stderr.
+- `--progress-json-version`: Select protocol version `1` or `2` (default: `1`). Hosts must opt in to v2 explicitly so existing v1 integrations remain compatible.
 
 #### JSON Lines progress protocol
 
@@ -257,6 +258,19 @@ error, or one terminal finish event:
 Progress values are finite numbers clamped to `0..100`. A terminal error exits
 non-zero; a successful run emits `finish` before exiting zero. SIGINT and SIGTERM
 first request graceful cancellation through BabelDOC's translation configuration.
+
+Version 2 covers initialization and asset transfers as well as translation:
+
+```json
+{"schema":"babeldoc-stream/v2","type":"progress","stage":"downloading_assets","stage_progress":42.3,"overall_progress":2.1}
+```
+
+`stage` is one of `checking_assets`, `downloading_assets`, `loading_model`,
+`parsing`, `analyzing`, `extracting_terms`, `translating`, `typesetting`, or
+`rendering`. `stage_progress` is `null` when a stage cannot be measured without
+fabricating progress. `overall_progress` is monotonic; initialization occupies
+`0..5` and translation occupies `5..100`. Error and finish events retain their
+v1 fields with the `babeldoc-stream/v2` schema identifier.
 
 ### General Options
 
