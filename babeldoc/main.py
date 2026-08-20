@@ -32,7 +32,7 @@ from babeldoc.translator.translator import OpenAITranslator
 from babeldoc.translator.translator import set_translate_rate_limiter
 
 logger = logging.getLogger(__name__)
-__version__ = "0.6.4.post2"
+__version__ = "0.6.4.post3"
 
 
 def create_parser():
@@ -584,41 +584,59 @@ async def main(protocol_stream=None) -> int:
     # 初始化文档布局模型
     if isinstance(emitter, JsonProgressEmitterV2):
         emitter.emit_progress("checking_assets", None, 0)
-        emitter.emit_progress("loading_model", None, 0)
+    emit_model_loading = (
+        (lambda: emitter.emit_progress("loading_model", None, 8))
+        if isinstance(emitter, JsonProgressEmitterV2)
+        else None
+    )
     if args.rpc_doclayout:
+        if emit_model_loading is not None:
+            emit_model_loading()
         from babeldoc.docvision.rpc_doclayout import RpcDocLayoutModel
 
         doc_layout_model = RpcDocLayoutModel(host=args.rpc_doclayout)
     elif args.rpc_doclayout2:
+        if emit_model_loading is not None:
+            emit_model_loading()
         from babeldoc.docvision.rpc_doclayout2 import RpcDocLayoutModel
 
         doc_layout_model = RpcDocLayoutModel(host=args.rpc_doclayout2)
     elif args.rpc_doclayout3:
+        if emit_model_loading is not None:
+            emit_model_loading()
         from babeldoc.docvision.rpc_doclayout3 import RpcDocLayoutModel
 
         doc_layout_model = RpcDocLayoutModel(host=args.rpc_doclayout3)
     elif args.rpc_doclayout4:
+        if emit_model_loading is not None:
+            emit_model_loading()
         from babeldoc.docvision.rpc_doclayout4 import RpcDocLayoutModel
 
         doc_layout_model = RpcDocLayoutModel(host=args.rpc_doclayout4)
     elif args.rpc_doclayout5:
+        if emit_model_loading is not None:
+            emit_model_loading()
         from babeldoc.docvision.rpc_doclayout5 import RpcDocLayoutModel
 
         doc_layout_model = RpcDocLayoutModel(host=args.rpc_doclayout5)
     elif args.rpc_doclayout6:
+        if emit_model_loading is not None:
+            emit_model_loading()
         from babeldoc.docvision.rpc_doclayout6 import RpcDocLayoutModel
 
         doc_layout_model = RpcDocLayoutModel(host=args.rpc_doclayout6)
     elif args.rpc_doclayout7:
+        if emit_model_loading is not None:
+            emit_model_loading()
         from babeldoc.docvision.rpc_doclayout7 import RpcDocLayoutModel
 
         doc_layout_model = RpcDocLayoutModel(host=args.rpc_doclayout7)
     else:
         from babeldoc.docvision.doclayout import DocLayoutModel
 
-        doc_layout_model = DocLayoutModel.load_onnx()
+        doc_layout_model = DocLayoutModel.load_onnx(emit_model_loading)
     if isinstance(emitter, JsonProgressEmitterV2):
-        emitter.emit_progress("loading_model", None, 4)
+        emitter.emit_progress("loading_model", None, 10)
 
     if args.translate_table_text:
         from babeldoc.docvision.table_detection.rapidocr import RapidOCRModel

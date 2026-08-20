@@ -100,9 +100,10 @@ def test_v2_emits_initialization_and_structured_translation_progress():
     stream = io.StringIO()
     emitter = JsonProgressEmitterV2(stream)
 
-    emitter.emit_progress("loading_model", None, 0)
+    emitter.emit_progress("checking_assets", None, 0)
+    emitter.handle_asset_progress("checking_assets", "layout-model", 50)
     emitter.handle_asset_progress("downloading_assets", "layout-model", 50)
-    emitter.emit_progress("loading_model", None, 4)
+    emitter.emit_progress("loading_model", None, 8)
     emitter.handle(
         {
             "type": "progress_start",
@@ -124,37 +125,44 @@ def test_v2_emits_initialization_and_structured_translation_progress():
         {
             "schema": "babeldoc-stream/v2",
             "type": "progress",
-            "stage": "loading_model",
+            "stage": "checking_assets",
             "stage_progress": None,
             "overall_progress": 0.0,
         },
         {
             "schema": "babeldoc-stream/v2",
             "type": "progress",
+            "stage": "checking_assets",
+            "stage_progress": 50.0,
+            "overall_progress": 0.5,
+        },
+        {
+            "schema": "babeldoc-stream/v2",
+            "type": "progress",
             "stage": "downloading_assets",
             "stage_progress": 50.0,
-            "overall_progress": 2.0,
+            "overall_progress": 4.5,
         },
         {
             "schema": "babeldoc-stream/v2",
             "type": "progress",
             "stage": "loading_model",
             "stage_progress": None,
-            "overall_progress": 4.0,
+            "overall_progress": 8.0,
         },
         {
             "schema": "babeldoc-stream/v2",
             "type": "progress",
             "stage": "parsing",
             "stage_progress": 0.0,
-            "overall_progress": 5.0,
+            "overall_progress": 10.0,
         },
         {
             "schema": "babeldoc-stream/v2",
             "type": "progress",
             "stage": "translating",
             "stage_progress": 25.0,
-            "overall_progress": 52.5,
+            "overall_progress": 55.0,
         },
     ]
 
@@ -186,7 +194,7 @@ def test_v2_keeps_overall_progress_monotonic_and_resets_per_asset():
         "type": "progress",
         "stage": "downloading_assets",
         "stage_progress": None,
-        "overall_progress": 14.5,
+        "overall_progress": 19.0,
     }
 
 

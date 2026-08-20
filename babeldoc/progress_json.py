@@ -164,6 +164,7 @@ class JsonProgressEmitterV2(JsonProgressEmitter):
         super().__init__(stream)
         self.schema = PROTOCOL_SCHEMA_V2
         self.last_overall_progress = 0.0
+        self.last_asset_stage: str | None = None
         self.last_asset_id: str | None = None
         self.last_asset_progress: float | None = None
 
@@ -185,7 +186,7 @@ class JsonProgressEmitterV2(JsonProgressEmitter):
             self.emit_progress(
                 V2_STAGE_BY_INTERNAL_NAME.get(stage, "analyzing"),
                 stage_progress,
-                5.0 + overall * 0.95,
+                10.0 + overall * 0.9,
             )
             return "progress"
 
@@ -219,7 +220,7 @@ class JsonProgressEmitterV2(JsonProgressEmitter):
         self, stage: str, asset_id: str, progress: float | None
     ) -> None:
         normalized = _finite_progress(progress)
-        if asset_id == self.last_asset_id:
+        if stage == self.last_asset_stage and asset_id == self.last_asset_id:
             if normalized is None and self.last_asset_progress is None:
                 return
             if normalized is not None:
@@ -228,12 +229,16 @@ class JsonProgressEmitterV2(JsonProgressEmitter):
                 if normalized < 100.0 and normalized - previous < 0.5:
                     return
         else:
+            self.last_asset_stage = stage
             self.last_asset_id = asset_id
         self.last_asset_progress = normalized
 
         overall = self.last_overall_progress
-        if overall < 5.0 and normalized is not None:
-            overall = max(overall, normalized * 0.04)
+        if normalized is not None:
+            if stage == "checking_assets":
+                overall = max(overall, normalized * 0.01)
+            elif stage == "downloading_assets":
+                overall = max(overall, 1.0 + normalized * 0.07)
         self.emit_progress(stage, normalized, overall)
 
 

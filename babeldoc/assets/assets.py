@@ -15,6 +15,9 @@ from babeldoc.assets.embedding_assets_metadata import DOC_LAYOUT_ONNX_MODEL_URL
 from babeldoc.assets.embedding_assets_metadata import (
     DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SHA3_256,
 )
+from babeldoc.assets.embedding_assets_metadata import (
+    DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SIZE,
+)
 from babeldoc.assets.embedding_assets_metadata import EMBEDDING_FONT_METADATA
 from babeldoc.assets.embedding_assets_metadata import FONT_METADATA_URL
 from babeldoc.assets.embedding_assets_metadata import FONT_URL_BY_UPSTREAM
@@ -46,6 +49,42 @@ def set_asset_progress_callback(
 def _report_asset_progress(stage: str, asset_id: str, progress: float | None) -> None:
     if _ASSET_PROGRESS_CALLBACK is not None:
         _ASSET_PROGRESS_CALLBACK(stage, asset_id, progress)
+
+
+class AssetProgressBatch:
+    """Aggregate byte progress for a fixed set of assets."""
+
+    def __init__(self, asset_sizes: dict[str, int]):
+        self.asset_sizes = {
+            asset_id: size for asset_id, size in asset_sizes.items() if size > 0
+        }
+        self.batch_id = f"asset-batch:{id(self)}"
+        self._progress_by_stage: dict[str, dict[str, int]] = {}
+        self._last_by_stage: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def report_bytes(self, stage: str, asset_id: str, completed: int) -> None:
+        expected = self.asset_sizes.get(asset_id)
+        if expected is None:
+            return
+        with self._lock:
+            stage_progress = self._progress_by_stage.setdefault(stage, {})
+            stage_progress[asset_id] = max(
+                stage_progress.get(asset_id, 0), min(expected, max(0, completed))
+            )
+            total = sum(self.asset_sizes.values())
+            progress = sum(stage_progress.values()) * 100 / total
+            progress = max(self._last_by_stage.get(stage, 0.0), progress)
+            self._last_by_stage[stage] = progress
+            _report_asset_progress(stage, self.batch_id, progress)
+
+    def complete(self, stage: str, asset_id: str) -> None:
+        expected = self.asset_sizes.get(asset_id)
+        if expected is not None:
+            self.report_bytes(stage, asset_id, expected)
+
+    def report_indeterminate(self, stage: str) -> None:
+        _report_asset_progress(stage, self.batch_id, None)
 
 
 class ResultContainer:
@@ -103,12 +142,24 @@ def _retry_if_not_cancelled_and_failed(retry_state):
     return False
 
 
-def verify_file(path: Path, sha3_256: str):
+def verify_file(
+    path: Path,
+    sha3_256: str,
+    progress_batch: AssetProgressBatch | None = None,
+    *,
+    report_progress: bool = True,
+):
+    asset_id = str(path)
     if not path.exists():
+        if report_progress and progress_batch is not None:
+            progress_batch.complete("checking_assets", asset_id)
         return False
     total = path.stat().st_size
-    asset_id = str(path)
-    _report_asset_progress("checking_assets", asset_id, 0.0 if total else None)
+    if report_progress:
+        if progress_batch is not None:
+            progress_batch.report_bytes("checking_assets", asset_id, 0)
+        else:
+            _report_asset_progress("checking_assets", asset_id, 0.0 if total else None)
     checked = 0
     hash_ = hashlib.sha3_256()
     with path.open("rb") as f:
@@ -118,11 +169,17 @@ def verify_file(path: Path, sha3_256: str):
                 break
             hash_.update(chunk)
             checked += len(chunk)
-            _report_asset_progress(
-                "checking_assets",
-                asset_id,
-                min(100.0, checked * 100 / total) if total else None,
-            )
+            if report_progress:
+                if progress_batch is not None:
+                    progress_batch.report_bytes("checking_assets", asset_id, checked)
+                else:
+                    _report_asset_progress(
+                        "checking_assets",
+                        asset_id,
+                        min(100.0, checked * 100 / total) if total else None,
+                    )
+    if report_progress and progress_batch is not None:
+        progress_batch.complete("checking_assets", asset_id)
     return hash_.hexdigest() == sha3_256
 
 
@@ -140,12 +197,17 @@ async def download_file(
     url: str = None,
     path: Path = None,
     sha3_256: str = None,
+    progress_batch: AssetProgressBatch | None = None,
 ):
     async def transfer(active_client: httpx.AsyncClient) -> None:
+        asset_id = str(path)
+        if progress_batch is not None:
+            progress_batch.report_indeterminate("downloading_assets")
+        else:
+            _report_asset_progress("downloading_assets", asset_id, None)
         request = active_client.build_request("GET", url)
         response = await active_client.send(request, follow_redirects=True, stream=True)
         temp_path = path.with_name(f"{path.name}.part")
-        asset_id = str(path)
         try:
             response.raise_for_status()
             content_length = response.headers.get("content-length")
@@ -153,26 +215,37 @@ async def download_file(
                 total = int(content_length) if content_length is not None else None
             except ValueError:
                 total = None
-            _report_asset_progress(
-                "downloading_assets",
-                asset_id,
-                0.0 if total and total > 0 else None,
-            )
+            if progress_batch is not None:
+                progress_batch.report_bytes("downloading_assets", asset_id, 0)
+            else:
+                _report_asset_progress(
+                    "downloading_assets",
+                    asset_id,
+                    0.0 if total and total > 0 else None,
+                )
             downloaded = 0
             with temp_path.open("wb") as file:
                 async for chunk in response.aiter_bytes(64 * 1024):
                     file.write(chunk)
                     downloaded += len(chunk)
-                    progress = (
-                        min(100.0, downloaded * 100 / total)
-                        if total and total > 0
-                        else None
-                    )
-                    _report_asset_progress("downloading_assets", asset_id, progress)
-            if not verify_file(temp_path, sha3_256):
+                    if progress_batch is not None:
+                        progress_batch.report_bytes(
+                            "downloading_assets", asset_id, downloaded
+                        )
+                    else:
+                        progress = (
+                            min(100.0, downloaded * 100 / total)
+                            if total and total > 0
+                            else None
+                        )
+                        _report_asset_progress("downloading_assets", asset_id, progress)
+            if not verify_file(temp_path, sha3_256, report_progress=False):
                 raise ValueError(f"File {path} is corrupted")
             temp_path.replace(path)
-            _report_asset_progress("downloading_assets", asset_id, 100.0)
+            if progress_batch is not None:
+                progress_batch.complete("downloading_assets", asset_id)
+            else:
+                _report_asset_progress("downloading_assets", asset_id, 100.0)
         except BaseException:
             temp_path.unlink(missing_ok=True)
             raise
@@ -186,13 +259,12 @@ async def download_file(
         await transfer(client)
 
 
-def _remember_fastest_upstream(upstream: str) -> None:
-    """Pin an upstream that just worked so the remaining font/cmap downloads
-    skip the one that failed. Safe to set without the lock: the metadata is
-    identical across upstreams, so only the download host changes."""
-    global _FASTEST_FONT_UPSTREAM
-    if upstream in FONT_METADATA_URL:
+def _remember_fastest_upstream(upstream: str, font_metadata: dict | None) -> None:
+    """Keep the cached upstream and its metadata consistent."""
+    global _FASTEST_FONT_METADATA, _FASTEST_FONT_UPSTREAM
+    if upstream in FONT_METADATA_URL and font_metadata is not None:
         _FASTEST_FONT_UPSTREAM = upstream
+        _FASTEST_FONT_METADATA = font_metadata
 
 
 async def download_file_with_fallback(
@@ -201,6 +273,8 @@ async def download_file_with_fallback(
     path: Path,
     sha3_256: str,
     preferred_upstream: str,
+    font_metadata: dict | None = None,
+    progress_batch: AssetProgressBatch | None = None,
 ) -> str:
     """Download from the preferred upstream, then the others in turn.
 
@@ -209,19 +283,29 @@ async def download_file_with_fallback(
     matching only huggingface.co never covers. Retrying one URL cannot recover
     from that, so exhaust the other upstreams before giving up.
     """
-    ordered = [preferred_upstream] if preferred_upstream in urls else []
-    ordered.extend(upstream for upstream in urls if upstream != preferred_upstream)
+    enabled_urls = {
+        upstream: url for upstream, url in urls.items() if upstream in FONT_METADATA_URL
+    }
+    ordered = [preferred_upstream] if preferred_upstream in enabled_urls else []
+    ordered.extend(
+        upstream for upstream in enabled_urls if upstream != preferred_upstream
+    )
 
     last_exception: Exception = ValueError(f"No upstream URL for {path.name}")
     for upstream in ordered:
         try:
-            await download_file(client, urls[upstream], path, sha3_256)
+            await download_file(
+                client,
+                enabled_urls[upstream],
+                path,
+                sha3_256,
+                progress_batch,
+            )
         except Exception as e:  # noqa: BLE001
             last_exception = e
             logger.warning(f"Download {path.name} from {upstream} failed: {e}")
             continue
-        if upstream != preferred_upstream:
-            _remember_fastest_upstream(upstream)
+        _remember_fastest_upstream(upstream, font_metadata)
         return upstream
     raise last_exception
 
@@ -330,15 +414,25 @@ async def get_fastest_upstream(client: httpx.AsyncClient | None = None):
     return online_font_metadata, fastest_upstream_for_font, fastest_upstream_for_model
 
 
-async def get_doclayout_onnx_model_path_async(client: httpx.AsyncClient | None = None):
+async def get_doclayout_onnx_model_path_async(
+    client: httpx.AsyncClient | None = None,
+    progress_batch: AssetProgressBatch | None = None,
+):
     onnx_path = get_cache_file_path(
         "doclayout_yolo_docstructbench_imgsz1024.onnx", "models"
     )
-    if verify_file(onnx_path, DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SHA3_256):
+    progress_batch = progress_batch or AssetProgressBatch(
+        {str(onnx_path): DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SIZE}
+    )
+    if verify_file(
+        onnx_path,
+        DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SHA3_256,
+        progress_batch,
+    ):
         return onnx_path
 
     logger.info("doclayout onnx model not found or corrupted, downloading...")
-    fastest_upstream, _ = await get_fastest_upstream_for_model(client)
+    fastest_upstream, font_metadata = await get_fastest_upstream_for_model(client)
     if fastest_upstream is None:
         logger.error("Failed to get fastest upstream")
         exit(1)
@@ -349,6 +443,8 @@ async def get_doclayout_onnx_model_path_async(client: httpx.AsyncClient | None =
         onnx_path,
         DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SHA3_256,
         fastest_upstream,
+        font_metadata,
+        progress_batch,
     )
     logger.info(f"Download doclayout onnx model from {upstream} success")
     return onnx_path
@@ -384,10 +480,19 @@ async def get_font_and_metadata_async(
     client: httpx.AsyncClient | None = None,
     fastest_upstream: str | None = None,
     font_metadata: dict | None = None,
+    progress_batch: AssetProgressBatch | None = None,
 ):
     cache_file_path = get_cache_file_path(font_file_name, "fonts")
+    embedded_metadata = EMBEDDING_FONT_METADATA.get(font_file_name)
+    progress_batch = progress_batch or AssetProgressBatch(
+        {str(cache_file_path): embedded_metadata.get("size", 1)}
+        if embedded_metadata is not None
+        else {}
+    )
     if font_file_name in EMBEDDING_FONT_METADATA and verify_file(
-        cache_file_path, EMBEDDING_FONT_METADATA[font_file_name]["sha3_256"]
+        cache_file_path,
+        EMBEDDING_FONT_METADATA[font_file_name]["sha3_256"],
+        progress_batch,
     ):
         return cache_file_path, EMBEDDING_FONT_METADATA[font_file_name]
 
@@ -402,7 +507,11 @@ async def get_font_and_metadata_async(
             logger.critical(f"Font {font_file_name} not found in {font_metadata}")
             exit(1)
 
-        if verify_file(cache_file_path, font_metadata[font_file_name]["sha3_256"]):
+        if verify_file(
+            cache_file_path,
+            font_metadata[font_file_name]["sha3_256"],
+            progress_batch,
+        ):
             return cache_file_path, font_metadata[font_file_name]
 
     assert font_metadata is not None
@@ -420,6 +529,8 @@ async def get_font_and_metadata_async(
         cache_file_path,
         font_metadata[font_file_name]["sha3_256"],
         fastest_upstream,
+        font_metadata,
+        progress_batch,
     )
     return cache_file_path, font_metadata[font_file_name]
 
@@ -428,8 +539,67 @@ def get_font_and_metadata(font_file_name: str):
     return run_coro(get_font_and_metadata_async(font_file_name))
 
 
+async def get_fonts_and_metadata_async(
+    font_file_names: list[str], client: httpx.AsyncClient | None = None
+) -> dict[str, tuple[Path, dict]]:
+    unique_names = list(dict.fromkeys(font_file_names))
+    missing_names = [
+        name
+        for name in unique_names
+        if not verify_file(
+            get_cache_file_path(name, "fonts"),
+            EMBEDDING_FONT_METADATA[name]["sha3_256"],
+            report_progress=False,
+        )
+    ]
+    results = {
+        name: (
+            get_cache_file_path(name, "fonts"),
+            EMBEDDING_FONT_METADATA[name],
+        )
+        for name in unique_names
+        if name not in missing_names
+    }
+    if not missing_names:
+        return results
+
+    progress_batch = AssetProgressBatch(
+        {
+            str(get_cache_file_path(name, "fonts")): EMBEDDING_FONT_METADATA[name][
+                "size"
+            ]
+            for name in missing_names
+        }
+    )
+    fastest_upstream, font_metadata = await get_fastest_upstream_for_font(client)
+    if fastest_upstream is None or font_metadata is None:
+        logger.critical("Failed to get fastest upstream for fonts")
+        exit(1)
+
+    downloaded = await asyncio.gather(
+        *(
+            get_font_and_metadata_async(
+                name,
+                client,
+                fastest_upstream,
+                font_metadata,
+                progress_batch,
+            )
+            for name in missing_names
+        )
+    )
+    results.update(zip(missing_names, downloaded, strict=True))
+    return results
+
+
+def get_fonts_and_metadata(font_file_names: list[str]):
+    return run_coro(get_fonts_and_metadata_async(font_file_names))
+
+
 async def get_cmap_file_path_async(
-    name: str, client: httpx.AsyncClient | None = None
+    name: str,
+    client: httpx.AsyncClient | None = None,
+    progress_batch: AssetProgressBatch | None = None,
 ) -> Path:
     """Get cached cmap file path, downloading it if necessary."""
     if name.endswith(".json"):
@@ -443,26 +613,31 @@ async def get_cmap_file_path_async(
 
     meta = CMAP_METADATA[file_name]
     cache_file_path = get_cache_file_path(file_name, "cmap")
-    if verify_file(cache_file_path, meta["sha3_256"]):
+    progress_batch = progress_batch or AssetProgressBatch(
+        {str(cache_file_path): meta.get("size", 1)}
+    )
+    if verify_file(cache_file_path, meta["sha3_256"], progress_batch):
         return cache_file_path
 
     logger.info(f"CMap {cache_file_path} not found or corrupted, downloading...")
-    await download_cmap_file_async(file_name, client)
-    if not verify_file(cache_file_path, meta["sha3_256"]):
+    await download_cmap_file_async(file_name, client, progress_batch)
+    if not verify_file(cache_file_path, meta["sha3_256"], report_progress=False):
         logger.critical(f"Failed to verify downloaded cmap file: {cache_file_path}")
         exit(1)
     return cache_file_path
 
 
 async def download_cmap_file_async(
-    file_name: str, client: httpx.AsyncClient | None = None
+    file_name: str,
+    client: httpx.AsyncClient | None = None,
+    progress_batch: AssetProgressBatch | None = None,
 ) -> Path:
     """Download a single cmap file to cache directory."""
     if file_name not in CMAP_METADATA:
         logger.critical(f"CMap {file_name} not found in CMAP_METADATA")
         exit(1)
 
-    fastest_upstream, _ = await get_fastest_upstream_for_font(client)
+    fastest_upstream, font_metadata = await get_fastest_upstream_for_font(client)
     if fastest_upstream is None:
         logger.critical("Failed to get fastest upstream for cmap")
         exit(1)
@@ -473,6 +648,9 @@ async def download_cmap_file_async(
 
     cache_file_path = get_cache_file_path(file_name, "cmap")
     sha3_256 = CMAP_METADATA[file_name]["sha3_256"]
+    progress_batch = progress_batch or AssetProgressBatch(
+        {str(cache_file_path): CMAP_METADATA[file_name].get("size", 1)}
+    )
     await download_file_with_fallback(
         client,
         {
@@ -482,6 +660,8 @@ async def download_cmap_file_async(
         cache_file_path,
         sha3_256,
         fastest_upstream,
+        font_metadata,
+        progress_batch,
     )
     return cache_file_path
 
@@ -507,16 +687,31 @@ def get_font_family(lang_code: str):
     return font_family
 
 
-async def download_all_fonts_async(client: httpx.AsyncClient | None = None):
-    for font_file_name in EMBEDDING_FONT_METADATA:
+async def download_all_fonts_async(
+    client: httpx.AsyncClient | None = None,
+    progress_batch: AssetProgressBatch | None = None,
+):
+    missing_fonts = [
+        font_file_name
+        for font_file_name, metadata in EMBEDDING_FONT_METADATA.items()
         if not verify_file(
             get_cache_file_path(font_file_name, "fonts"),
-            EMBEDDING_FONT_METADATA[font_file_name]["sha3_256"],
-        ):
-            break
-    else:
+            metadata["sha3_256"],
+            report_progress=False,
+        )
+    ]
+    if not missing_fonts:
         logger.debug("All fonts are already downloaded")
         return
+
+    progress_batch = progress_batch or AssetProgressBatch(
+        {
+            str(get_cache_file_path(name, "fonts")): EMBEDDING_FONT_METADATA[name][
+                "size"
+            ]
+            for name in missing_fonts
+        }
+    )
 
     fastest_upstream, font_metadata = await get_fastest_upstream_for_font(client)
     if fastest_upstream is None:
@@ -527,25 +722,42 @@ async def download_all_fonts_async(client: httpx.AsyncClient | None = None):
     font_tasks = [
         asyncio.create_task(
             get_font_and_metadata_async(
-                font_file_name, client, fastest_upstream, font_metadata
+                font_file_name,
+                client,
+                fastest_upstream,
+                font_metadata,
+                progress_batch,
             )
         )
-        for font_file_name in EMBEDDING_FONT_METADATA
+        for font_file_name in missing_fonts
     ]
     await asyncio.gather(*font_tasks)
 
 
-async def download_all_cmaps_async(client: httpx.AsyncClient | None = None):
+async def download_all_cmaps_async(
+    client: httpx.AsyncClient | None = None,
+    progress_batch: AssetProgressBatch | None = None,
+):
     """Download all cmap files defined in CMAP_METADATA."""
-    for cmap_file_name, meta in CMAP_METADATA.items():
+    missing_cmaps = [
+        cmap_file_name
+        for cmap_file_name, meta in CMAP_METADATA.items()
         if not verify_file(
             get_cache_file_path(cmap_file_name, "cmap"),
             meta["sha3_256"],
-        ):
-            break
-    else:
+            report_progress=False,
+        )
+    ]
+    if not missing_cmaps:
         logger.debug("All cmaps are already downloaded")
         return
+
+    progress_batch = progress_batch or AssetProgressBatch(
+        {
+            str(get_cache_file_path(name, "cmap")): CMAP_METADATA[name]["size"]
+            for name in missing_cmaps
+        }
+    )
 
     fastest_upstream, _ = await get_fastest_upstream_for_font(client)
     if fastest_upstream is None:
@@ -554,8 +766,10 @@ async def download_all_cmaps_async(client: httpx.AsyncClient | None = None):
     logger.info(f"Downloading cmaps from {fastest_upstream}")
 
     cmap_tasks = [
-        asyncio.create_task(get_cmap_file_path_async(cmap_file_name, client))
-        for cmap_file_name in CMAP_METADATA
+        asyncio.create_task(
+            get_cmap_file_path_async(cmap_file_name, client, progress_batch)
+        )
+        for cmap_file_name in missing_cmaps
     ]
     await asyncio.gather(*cmap_tasks)
 
@@ -565,10 +779,45 @@ async def async_warmup():
     from tiktoken import encoding_for_model
 
     _ = encoding_for_model("gpt-4o")
+    onnx_path = get_cache_file_path(
+        "doclayout_yolo_docstructbench_imgsz1024.onnx", "models"
+    )
+    asset_specs = {
+        str(onnx_path): (
+            DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SIZE,
+            DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SHA3_256,
+        ),
+        **{
+            str(get_cache_file_path(name, "fonts")): (
+                metadata["size"],
+                metadata["sha3_256"],
+            )
+            for name, metadata in EMBEDDING_FONT_METADATA.items()
+        },
+        **{
+            str(get_cache_file_path(name, "cmap")): (
+                metadata["size"],
+                metadata["sha3_256"],
+            )
+            for name, metadata in CMAP_METADATA.items()
+        },
+    }
+    missing_asset_sizes = {
+        asset_id: size
+        for asset_id, (size, sha3_256) in asset_specs.items()
+        if not verify_file(Path(asset_id), sha3_256, report_progress=False)
+    }
+    progress_batch = AssetProgressBatch(missing_asset_sizes)
     async with httpx.AsyncClient() as client:
-        onnx_task = asyncio.create_task(get_doclayout_onnx_model_path_async(client))
-        font_tasks = asyncio.create_task(download_all_fonts_async(client))
-        cmap_tasks = asyncio.create_task(download_all_cmaps_async(client))
+        onnx_task = asyncio.create_task(
+            get_doclayout_onnx_model_path_async(client, progress_batch)
+        )
+        font_tasks = asyncio.create_task(
+            download_all_fonts_async(client, progress_batch)
+        )
+        cmap_tasks = asyncio.create_task(
+            download_all_cmaps_async(client, progress_batch)
+        )
         await asyncio.gather(onnx_task, font_tasks, cmap_tasks)
 
 

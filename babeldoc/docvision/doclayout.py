@@ -97,8 +97,10 @@ class OnnxModel(DocLayoutModel):
         return model
 
     @staticmethod
-    def from_pretrained():
+    def from_pretrained(on_model_loading=None):
         pth = get_doclayout_onnx_model_path()
+        if on_model_loading is not None:
+            on_model_loading()
         return OnnxModel(pth)
 
     @property

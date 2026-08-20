@@ -39,11 +39,11 @@ class YoloBox:
 
 class DocLayoutModel(abc.ABC):
     @staticmethod
-    def load_onnx():
+    def load_onnx(on_model_loading=None):
         logger.info("Loading ONNX model...")
         from babeldoc.docvision.doclayout import OnnxModel
 
-        model = OnnxModel.from_pretrained()
+        model = OnnxModel.from_pretrained(on_model_loading)
         return model
 
     @staticmethod

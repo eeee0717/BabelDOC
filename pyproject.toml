@@ -1,6 +1,6 @@
 [project]
 name = "babeldoc-stream"
-version = "0.6.4.post2"
+version = "0.6.4.post3"
 description = "BabelDOC with a stable JSON Lines progress protocol"
 license = "AGPL-3.0"
 readme = "README.md"
@@ -169,7 +169,7 @@ pythonpath = [".", "src"]
 testpaths = ["tests"]
 
 [bumpver]
-current_version = "0.6.4.post2"
+current_version = "0.6.4.post3"
 version_pattern = "MAJOR.MINOR.PATCH[.PYTAGNUM]"
 
 [bumpver.file_patterns]
