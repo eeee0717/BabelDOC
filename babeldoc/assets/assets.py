@@ -186,6 +186,46 @@ async def download_file(
         await transfer(client)
 
 
+def _remember_fastest_upstream(upstream: str) -> None:
+    """Pin an upstream that just worked so the remaining font/cmap downloads
+    skip the one that failed. Safe to set without the lock: the metadata is
+    identical across upstreams, so only the download host changes."""
+    global _FASTEST_FONT_UPSTREAM
+    if upstream in FONT_METADATA_URL:
+        _FASTEST_FONT_UPSTREAM = upstream
+
+
+async def download_file_with_fallback(
+    client: httpx.AsyncClient | None,
+    urls: dict[str, str],
+    path: Path,
+    sha3_256: str,
+    preferred_upstream: str,
+) -> str:
+    """Download from the preferred upstream, then the others in turn.
+
+    A reachable metadata host does not imply a reachable download host: the
+    HuggingFace LFS redirect lands on a separate CDN domain that a proxy rule
+    matching only huggingface.co never covers. Retrying one URL cannot recover
+    from that, so exhaust the other upstreams before giving up.
+    """
+    ordered = [preferred_upstream] if preferred_upstream in urls else []
+    ordered.extend(upstream for upstream in urls if upstream != preferred_upstream)
+
+    last_exception: Exception = ValueError(f"No upstream URL for {path.name}")
+    for upstream in ordered:
+        try:
+            await download_file(client, urls[upstream], path, sha3_256)
+        except Exception as e:  # noqa: BLE001
+            last_exception = e
+            logger.warning(f"Download {path.name} from {upstream} failed: {e}")
+            continue
+        if upstream != preferred_upstream:
+            _remember_fastest_upstream(upstream)
+        return upstream
+    raise last_exception
+
+
 @retry(
     retry=_retry_if_not_cancelled_and_failed,
     stop=stop_after_attempt(3),
@@ -303,12 +343,14 @@ async def get_doclayout_onnx_model_path_async(client: httpx.AsyncClient | None =
         logger.error("Failed to get fastest upstream")
         exit(1)
 
-    url = DOC_LAYOUT_ONNX_MODEL_URL[fastest_upstream]
-
-    await download_file(
-        client, url, onnx_path, DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SHA3_256
+    upstream = await download_file_with_fallback(
+        client,
+        DOC_LAYOUT_ONNX_MODEL_URL,
+        onnx_path,
+        DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SHA3_256,
+        fastest_upstream,
     )
-    logger.info(f"Download doclayout onnx model from {fastest_upstream} success")
+    logger.info(f"Download doclayout onnx model from {upstream} success")
     return onnx_path
 
 
@@ -366,12 +408,18 @@ async def get_font_and_metadata_async(
     assert font_metadata is not None
     logger.info(f"download {font_file_name} from {fastest_upstream}")
 
-    url = get_font_url_by_name_and_upstream(font_file_name, fastest_upstream)
     if "sha3_256" not in font_metadata[font_file_name]:
         logger.critical(f"Font {font_file_name} not found in {font_metadata}")
         exit(1)
-    await download_file(
-        client, url, cache_file_path, font_metadata[font_file_name]["sha3_256"]
+    await download_file_with_fallback(
+        client,
+        {
+            upstream: url_of(font_file_name)
+            for upstream, url_of in FONT_URL_BY_UPSTREAM.items()
+        },
+        cache_file_path,
+        font_metadata[font_file_name]["sha3_256"],
+        fastest_upstream,
     )
     return cache_file_path, font_metadata[font_file_name]
 
@@ -423,10 +471,18 @@ async def download_cmap_file_async(
         logger.critical(f"Invalid fastest upstream for cmap: {fastest_upstream}")
         exit(1)
 
-    url = CMAP_URL_BY_UPSTREAM[fastest_upstream](file_name)
     cache_file_path = get_cache_file_path(file_name, "cmap")
     sha3_256 = CMAP_METADATA[file_name]["sha3_256"]
-    await download_file(client, url, cache_file_path, sha3_256)
+    await download_file_with_fallback(
+        client,
+        {
+            upstream: url_of(file_name)
+            for upstream, url_of in CMAP_URL_BY_UPSTREAM.items()
+        },
+        cache_file_path,
+        sha3_256,
+        fastest_upstream,
+    )
     return cache_file_path
 
 
