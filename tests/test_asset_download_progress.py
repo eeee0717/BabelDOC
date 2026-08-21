@@ -98,13 +98,14 @@ def test_warmup_shares_one_batch_across_model_fonts_and_cmaps(monkeypatch):
     async def capture_batch(_client, progress_batch):
         batches.append(progress_batch)
 
+    monkeypatch.setattr(assets, "download_tiktoken_caches_async", capture_batch)
     monkeypatch.setattr(assets, "get_doclayout_onnx_model_path_async", capture_batch)
     monkeypatch.setattr(assets, "download_all_fonts_async", capture_batch)
     monkeypatch.setattr(assets, "download_all_cmaps_async", capture_batch)
 
     asyncio.run(assets.async_warmup())
 
-    assert batches == [batch, batch, batch]
+    assert batches == [batch, batch, batch, batch]
 
 
 def test_download_file_streams_progress_and_replaces_destination(tmp_path):

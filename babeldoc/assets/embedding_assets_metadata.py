@@ -8,6 +8,11 @@ DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SIZE = 75324598
 TIKTOKEN_CACHES = {
     "fb374d419588a4632f3f557e76b4b70aebbca790": "cb04bcda5782cfbbe77f2f991d92c0ea785d9496ef1137c91dfc3c8c324528d6"
 }
+TIKTOKEN_CACHE_SIZES = {"fb374d419588a4632f3f557e76b4b70aebbca790": 3613922}
+TIKTOKEN_URL_BY_UPSTREAM = {
+    "openai": "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken",
+    "modelscope": "https://www.modelscope.cn/datasets/awwaawwa/BabelDOCAssets/resolve/master/tiktoken/fb374d419588a4632f3f557e76b4b70aebbca790",
+}
 
 FONT_METADATA_URL = {
     "github": "https://raw.githubusercontent.com/funstory-ai/BabelDOC-Assets/refs/heads/main/font_metadata.json",
@@ -17,17 +22,33 @@ FONT_METADATA_URL = {
 }
 
 FONT_URL_BY_UPSTREAM = {
-    "github": lambda name: f"https://raw.githubusercontent.com/funstory-ai/BabelDOC-Assets/refs/heads/main/fonts/{name}",
-    "huggingface": lambda name: f"https://huggingface.co/datasets/awwaawwa/BabelDOC-Assets/resolve/main/fonts/{name}?download=true",
-    "hf-mirror": lambda name: f"https://hf-mirror.com/datasets/awwaawwa/BabelDOC-Assets/resolve/main/fonts/{name}?download=true",
-    "modelscope": lambda name: f"https://www.modelscope.cn/datasets/awwaawwa/BabelDOCAssets/resolve/master/fonts/{name}",
+    "github": lambda name: (
+        f"https://raw.githubusercontent.com/funstory-ai/BabelDOC-Assets/refs/heads/main/fonts/{name}"
+    ),
+    "huggingface": lambda name: (
+        f"https://huggingface.co/datasets/awwaawwa/BabelDOC-Assets/resolve/main/fonts/{name}?download=true"
+    ),
+    "hf-mirror": lambda name: (
+        f"https://hf-mirror.com/datasets/awwaawwa/BabelDOC-Assets/resolve/main/fonts/{name}?download=true"
+    ),
+    "modelscope": lambda name: (
+        f"https://www.modelscope.cn/datasets/awwaawwa/BabelDOCAssets/resolve/master/fonts/{name}"
+    ),
 }
 
 CMAP_URL_BY_UPSTREAM = {
-    "github": lambda name: f"https://raw.githubusercontent.com/funstory-ai/BabelDOC-Assets/refs/heads/main/cmap/{name}",
-    "huggingface": lambda name: f"https://huggingface.co/datasets/awwaawwa/BabelDOC-Assets/resolve/main/cmap/{name}?download=true",
-    "hf-mirror": lambda name: f"https://hf-mirror.com/datasets/awwaawwa/BabelDOC-Assets/resolve/main/cmap/{name}?download=true",
-    "modelscope": lambda name: f"https://www.modelscope.cn/datasets/awwaawwa/BabelDOCAssets/resolve/master/cmap/{name}",
+    "github": lambda name: (
+        f"https://raw.githubusercontent.com/funstory-ai/BabelDOC-Assets/refs/heads/main/cmap/{name}"
+    ),
+    "huggingface": lambda name: (
+        f"https://huggingface.co/datasets/awwaawwa/BabelDOC-Assets/resolve/main/cmap/{name}?download=true"
+    ),
+    "hf-mirror": lambda name: (
+        f"https://hf-mirror.com/datasets/awwaawwa/BabelDOC-Assets/resolve/main/cmap/{name}?download=true"
+    ),
+    "modelscope": lambda name: (
+        f"https://www.modelscope.cn/datasets/awwaawwa/BabelDOCAssets/resolve/master/cmap/{name}"
+    ),
 }
 
 DOC_LAYOUT_ONNX_MODEL_URL = {

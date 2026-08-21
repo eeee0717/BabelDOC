@@ -2,7 +2,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import threading
+import time
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -21,7 +23,9 @@ from babeldoc.assets.embedding_assets_metadata import (
 from babeldoc.assets.embedding_assets_metadata import EMBEDDING_FONT_METADATA
 from babeldoc.assets.embedding_assets_metadata import FONT_METADATA_URL
 from babeldoc.assets.embedding_assets_metadata import FONT_URL_BY_UPSTREAM
+from babeldoc.assets.embedding_assets_metadata import TIKTOKEN_CACHE_SIZES
 from babeldoc.assets.embedding_assets_metadata import TIKTOKEN_CACHES
+from babeldoc.assets.embedding_assets_metadata import TIKTOKEN_URL_BY_UPSTREAM
 from babeldoc.const import get_cache_file_path
 from tenacity import retry
 from tenacity import stop_after_attempt
@@ -34,6 +38,7 @@ _FASTEST_FONT_UPSTREAM_LOCK = asyncio.Lock()
 _FASTEST_FONT_UPSTREAM: str | None = None
 _FASTEST_FONT_METADATA: dict | None = None
 _ASSET_PROGRESS_CALLBACK: Callable[[str, str, float | None], None] | None = None
+_ASSET_UPSTREAM_ENV = "BABELDOC_ASSET_UPSTREAM"
 
 
 def set_asset_progress_callback(
@@ -49,6 +54,44 @@ def set_asset_progress_callback(
 def _report_asset_progress(stage: str, asset_id: str, progress: float | None) -> None:
     if _ASSET_PROGRESS_CALLBACK is not None:
         _ASSET_PROGRESS_CALLBACK(stage, asset_id, progress)
+
+
+def _configured_asset_upstream() -> str | None:
+    value = os.getenv(_ASSET_UPSTREAM_ENV)
+    if value is None or not value.strip():
+        return None
+    upstream = value.strip().lower()
+    if upstream not in FONT_METADATA_URL:
+        choices = ", ".join(FONT_METADATA_URL)
+        raise ValueError(f"Invalid {_ASSET_UPSTREAM_ENV}: {value!r}; choose {choices}")
+    return upstream
+
+
+def _log_asset_request(
+    *,
+    source: str,
+    original_url: str,
+    final_url: str,
+    byte_count: int,
+    elapsed_ms: int,
+    verification: str,
+    result: str,
+) -> None:
+    logger.info(
+        "Asset request audit %s",
+        json.dumps(
+            {
+                "source": source,
+                "original_url": original_url,
+                "final_url": final_url,
+                "bytes": byte_count,
+                "elapsed_ms": elapsed_ms,
+                "verification": verification,
+                "result": result,
+            },
+            sort_keys=True,
+        ),
+    )
 
 
 class AssetProgressBatch:
@@ -198,6 +241,7 @@ async def download_file(
     path: Path = None,
     sha3_256: str = None,
     progress_batch: AssetProgressBatch | None = None,
+    source: str = "unknown",
 ):
     async def transfer(active_client: httpx.AsyncClient) -> None:
         asset_id = str(path)
@@ -205,10 +249,19 @@ async def download_file(
             progress_batch.report_indeterminate("downloading_assets")
         else:
             _report_asset_progress("downloading_assets", asset_id, None)
-        request = active_client.build_request("GET", url)
-        response = await active_client.send(request, follow_redirects=True, stream=True)
         temp_path = path.with_name(f"{path.name}.part")
+        response: httpx.Response | None = None
+        started_at = time.perf_counter()
+        final_url = url
+        downloaded = 0
+        verification = "not_run"
+        result = "failed"
         try:
+            request = active_client.build_request("GET", url)
+            response = await active_client.send(
+                request, follow_redirects=True, stream=True
+            )
+            final_url = str(response.url)
             response.raise_for_status()
             content_length = response.headers.get("content-length")
             try:
@@ -223,7 +276,6 @@ async def download_file(
                     asset_id,
                     0.0 if total and total > 0 else None,
                 )
-            downloaded = 0
             with temp_path.open("wb") as file:
                 async for chunk in response.aiter_bytes(64 * 1024):
                     file.write(chunk)
@@ -240,8 +292,11 @@ async def download_file(
                         )
                         _report_asset_progress("downloading_assets", asset_id, progress)
             if not verify_file(temp_path, sha3_256, report_progress=False):
+                verification = "failed"
                 raise ValueError(f"File {path} is corrupted")
+            verification = "passed"
             temp_path.replace(path)
+            result = "success"
             if progress_batch is not None:
                 progress_batch.complete("downloading_assets", asset_id)
             else:
@@ -250,7 +305,17 @@ async def download_file(
             temp_path.unlink(missing_ok=True)
             raise
         finally:
-            await response.aclose()
+            if response is not None:
+                await response.aclose()
+            _log_asset_request(
+                source=source,
+                original_url=url,
+                final_url=final_url,
+                byte_count=downloaded,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000),
+                verification=verification,
+                result=result,
+            )
 
     if client is None:
         async with httpx.AsyncClient() as owned_client:
@@ -275,6 +340,7 @@ async def download_file_with_fallback(
     preferred_upstream: str,
     font_metadata: dict | None = None,
     progress_batch: AssetProgressBatch | None = None,
+    enabled_upstreams: set[str] | None = None,
 ) -> str:
     """Download from the preferred upstream, then the others in turn.
 
@@ -283,8 +349,9 @@ async def download_file_with_fallback(
     matching only huggingface.co never covers. Retrying one URL cannot recover
     from that, so exhaust the other upstreams before giving up.
     """
+    allowed = enabled_upstreams or set(FONT_METADATA_URL)
     enabled_urls = {
-        upstream: url for upstream, url in urls.items() if upstream in FONT_METADATA_URL
+        upstream: url for upstream, url in urls.items() if upstream in allowed
     }
     ordered = [preferred_upstream] if preferred_upstream in enabled_urls else []
     ordered.extend(
@@ -300,6 +367,7 @@ async def download_file_with_fallback(
                 path,
                 sha3_256,
                 progress_batch,
+                upstream,
             )
         except Exception as e:  # noqa: BLE001
             last_exception = e
@@ -326,26 +394,62 @@ async def get_font_metadata(
         logger.critical(f"Invalid upstream: {upstream}")
         exit(1)
 
-    if client is None:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                FONT_METADATA_URL[upstream], follow_redirects=True
+    async def request_metadata(active_client: httpx.AsyncClient):
+        url = FONT_METADATA_URL[upstream]
+        started_at = time.perf_counter()
+        final_url = url
+        byte_count = 0
+        result = "failed"
+        try:
+            response = await active_client.get(url, follow_redirects=True)
+            final_url = str(response.url)
+            byte_count = len(response.content)
+            response.raise_for_status()
+            metadata = response.json()
+            result = "success"
+            logger.debug(f"Get font metadata from {upstream} success")
+            return upstream, metadata
+        finally:
+            _log_asset_request(
+                source=upstream,
+                original_url=url,
+                final_url=final_url,
+                byte_count=byte_count,
+                elapsed_ms=round((time.perf_counter() - started_at) * 1000),
+                verification="not_applicable",
+                result=result,
             )
-    else:
-        response = await client.get(FONT_METADATA_URL[upstream], follow_redirects=True)
 
-    response.raise_for_status()
-    logger.debug(f"Get font metadata from {upstream} success")
-    return upstream, response.json()
+    if client is None:
+        async with httpx.AsyncClient() as owned_client:
+            return await request_metadata(owned_client)
+    return await request_metadata(client)
 
 
 async def _get_fastest_upstream_for_font_internal(
     client: httpx.AsyncClient | None = None, exclude_upstream: list[str] | None = None
 ) -> tuple[str | None, dict | None]:
     """Find the fastest upstream for font metadata without using cached result."""
+    excluded = set(exclude_upstream or [])
+    configured = _configured_asset_upstream()
+    if configured is not None and configured not in excluded:
+        ordered = [configured]
+        ordered.extend(
+            upstream
+            for upstream in FONT_METADATA_URL
+            if upstream != configured and upstream not in excluded
+        )
+        for upstream in ordered:
+            try:
+                return await get_font_metadata(client, upstream)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Error getting font metadata from {upstream}: {e}")
+        logger.error("All upstreams failed")
+        return None, None
+
     tasks: list[asyncio.Task[tuple[str, dict]]] = []
     for upstream in FONT_METADATA_URL:
-        if exclude_upstream and upstream in exclude_upstream:
+        if upstream in excluded:
             continue
         tasks.append(asyncio.create_task(get_font_metadata(client, upstream)))
     for future in asyncio.as_completed(tasks):
@@ -774,11 +878,28 @@ async def download_all_cmaps_async(
     await asyncio.gather(*cmap_tasks)
 
 
+async def download_tiktoken_caches_async(
+    client: httpx.AsyncClient | None = None,
+    progress_batch: AssetProgressBatch | None = None,
+) -> None:
+    preferred_upstream = _configured_asset_upstream() or "openai"
+    for cache_name, sha3_256 in TIKTOKEN_CACHES.items():
+        cache_path = get_cache_file_path(cache_name, "tiktoken")
+        if verify_file(cache_path, sha3_256, progress_batch):
+            continue
+        await download_file_with_fallback(
+            client,
+            TIKTOKEN_URL_BY_UPSTREAM,
+            cache_path,
+            sha3_256,
+            preferred_upstream,
+            progress_batch=progress_batch,
+            enabled_upstreams=set(TIKTOKEN_URL_BY_UPSTREAM),
+        )
+
+
 async def async_warmup():
     logger.info("Downloading all assets...")
-    from tiktoken import encoding_for_model
-
-    _ = encoding_for_model("gpt-4o")
     onnx_path = get_cache_file_path(
         "doclayout_yolo_docstructbench_imgsz1024.onnx", "models"
     )
@@ -787,6 +908,10 @@ async def async_warmup():
             DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SIZE,
             DOCLAYOUT_YOLO_DOCSTRUCTBENCH_IMGSZ1024ONNX_SHA3_256,
         ),
+        **{
+            str(get_cache_file_path(name, "tiktoken")): (size, TIKTOKEN_CACHES[name])
+            for name, size in TIKTOKEN_CACHE_SIZES.items()
+        },
         **{
             str(get_cache_file_path(name, "fonts")): (
                 metadata["size"],
@@ -809,6 +934,10 @@ async def async_warmup():
     }
     progress_batch = AssetProgressBatch(missing_asset_sizes)
     async with httpx.AsyncClient() as client:
+        await download_tiktoken_caches_async(client, progress_batch)
+        from tiktoken import encoding_for_model
+
+        _ = encoding_for_model("gpt-4o")
         onnx_task = asyncio.create_task(
             get_doclayout_onnx_model_path_async(client, progress_batch)
         )
