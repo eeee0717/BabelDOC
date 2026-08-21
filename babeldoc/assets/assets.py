@@ -39,6 +39,10 @@ _FASTEST_FONT_UPSTREAM: str | None = None
 _FASTEST_FONT_METADATA: dict | None = None
 _ASSET_PROGRESS_CALLBACK: Callable[[str, str, float | None], None] | None = None
 _ASSET_UPSTREAM_ENV = "BABELDOC_ASSET_UPSTREAM"
+# ModelScope resolves every file through a signed CDN redirect and needs 5-10s
+# even for a 13 KB metadata file, so httpx's 5s default times out on the very
+# first request and pins the whole run to an overseas upstream.
+_ASSET_HTTP_TIMEOUT = httpx.Timeout(30.0)
 
 
 def set_asset_progress_callback(
@@ -318,7 +322,7 @@ async def download_file(
             )
 
     if client is None:
-        async with httpx.AsyncClient() as owned_client:
+        async with httpx.AsyncClient(timeout=_ASSET_HTTP_TIMEOUT) as owned_client:
             await transfer(owned_client)
     else:
         await transfer(client)
@@ -421,7 +425,7 @@ async def get_font_metadata(
             )
 
     if client is None:
-        async with httpx.AsyncClient() as owned_client:
+        async with httpx.AsyncClient(timeout=_ASSET_HTTP_TIMEOUT) as owned_client:
             return await request_metadata(owned_client)
     return await request_metadata(client)
 
@@ -933,7 +937,7 @@ async def async_warmup():
         if not verify_file(Path(asset_id), sha3_256, report_progress=False)
     }
     progress_batch = AssetProgressBatch(missing_asset_sizes)
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=_ASSET_HTTP_TIMEOUT) as client:
         await download_tiktoken_caches_async(client, progress_batch)
         from tiktoken import encoding_for_model
 
