@@ -11,7 +11,6 @@ TIKTOKEN_CACHES = {
 TIKTOKEN_CACHE_SIZES = {"fb374d419588a4632f3f557e76b4b70aebbca790": 3613922}
 TIKTOKEN_URL_BY_UPSTREAM = {
     "openai": "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken",
-    "modelscope": "https://www.modelscope.cn/datasets/awwaawwa/BabelDOCAssets/resolve/master/tiktoken/fb374d419588a4632f3f557e76b4b70aebbca790",
 }
 
 FONT_METADATA_URL = {
